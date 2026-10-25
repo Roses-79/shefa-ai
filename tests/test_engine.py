@@ -344,7 +344,7 @@ class TestGeminiAgent(unittest.TestCase):
 
     def test_tool_declarations_valid(self):
         decls = self.ga._declarations()
-        self.assertEqual(len(decls), 6)
+        self.assertEqual(len(decls), 5)
         self.assertNotIn("additionalProperties", str(decls[0].parameters_json_schema))
 
     def test_loop(self):

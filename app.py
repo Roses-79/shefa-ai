@@ -117,8 +117,11 @@ with st.sidebar:
             if st.session_state.get("gemini_models_key") != key:
                 st.session_state.gemini_models = gemini_agent.available_models(agent_client)
                 st.session_state.gemini_models_key = key
-            agent_model = st.selectbox("الموديل", st.session_state.gemini_models,
-                                       help="موديلات Flash عليها الخطة المجانية")
+            agent_model = st.selectbox(
+                "الموديل", [gemini_agent.AUTO] + st.session_state.gemini_models,
+                format_func=lambda m: "⚡ تلقائي (أسرع موديل متاح دلوقتي)" if m == gemini_agent.AUTO else m,
+                help="التلقائي بيجرب كذا موديل في أول المحادثة ويختار الأحدث اللي بيرد بسرعة "
+                     "(الموديلات الجديدة ساعات بيبقى عليها ضغط).")
     else:
         key = st.text_input("Anthropic API Key", type="password",
                             help="من console.anthropic.com (مدفوع)") or _secret("ANTHROPIC_API_KEY")
@@ -379,6 +382,7 @@ def reset_agent():
     st.session_state.agent_history = []          # الرسايل بصيغة الـ API بتاع المزوّد
     st.session_state.agent_display = [{"role": "assistant", "content": AGENT_GREETING}]
     st.session_state.agent_history_owner = (st.session_state.get("agent_provider"), st.session_state.get("agent_model"))
+    st.session_state.gemini_active_model = None  # الموديل اللي اتختار تلقائياً للمحادثة دي
 
 
 # لو المزوّد أو الموديل اتغير نبدأ محادثة جديدة (صيغة الرسايل بتختلف من مزوّد للتاني)
@@ -404,7 +408,17 @@ def agent_send(text: str):
             args = (st.session_state.agent_client, st.session_state.agent_history, text,
                     st.session_state.profile, st.session_state.chronic)
             if st.session_state.agent_provider == "gemini":
-                out = gemini_agent.run_turn(*args, on_tool=on_tool, model=st.session_state.agent_model)
+                model = st.session_state.agent_model
+                if model == gemini_agent.AUTO:
+                    if not st.session_state.gemini_active_model:
+                        status.write("⚡ بختار أسرع موديل Gemini متاح دلوقتي...")
+                        st.session_state.gemini_active_model = gemini_agent.pick_fast_model(
+                            st.session_state.agent_client, st.session_state.gemini_models)
+                        status.write(f"✅ الموديل: `{st.session_state.gemini_active_model}`")
+                    model = st.session_state.gemini_active_model
+                out = gemini_agent.run_turn(
+                    *args, on_tool=on_tool, model=model,
+                    on_wait=lambda sec: status.write(f"⏳ الخطة المجانية ليها حد في الدقيقة، بستنى {sec:.0f} ثانية وأكمل..."))
             else:
                 out = agent.run_turn(*args, on_tool=on_tool)
         except Exception as e:

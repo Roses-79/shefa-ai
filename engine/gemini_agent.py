@@ -5,10 +5,17 @@
 الفرق بس في طريقة الكلام مع الـ API (مكتبة google-genai).
 """
 import re
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .agent import MAX_STEPS, SYSTEM_PROMPT, TOOL_LABELS, TOOLS, execute_tool, patient_context, summarize_result
 
-DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_MODEL = "gemini-flash-latest"
+AUTO = "auto"            # اختيار تلقائي لأسرع موديل متاح دلوقتي
+REQUEST_TIMEOUT_MS = 90_000
+PROBE_TIMEOUT_MS = 15_000
+TRANSIENT_CODES = {429, 500, 503, 504}
+MAX_RATE_LIMIT_WAIT = 40  # ثانية
 
 try:
     from google import genai
@@ -20,7 +27,10 @@ except ImportError:  # المكتبة مش متسطبة
 def get_client(api_key: str):
     if genai is None or not api_key:
         return None
-    return genai.Client(api_key=api_key)
+    # من غير إعادة محاولات مخفية: لما سيرفرات جوجل عليها ضغط، المكتبة كانت بتعيد المحاولة لوحدها
+    # لدرجة إن الرد ياخد أكتر من دقيقتين. إحنا بنتعامل مع ده بنفسنا (اختيار موديل تاني).
+    return genai.Client(api_key=api_key, http_options=types.HttpOptions(
+        timeout=REQUEST_TIMEOUT_MS, retry_options=types.HttpRetryOptions(attempts=1)))
 
 
 def available_models(client) -> list:
@@ -35,7 +45,7 @@ def available_models(client) -> list:
             actions = m.supported_actions or []
             if not name.startswith("gemini-") or "generateContent" not in actions:
                 continue
-            if re.search(r"(image|tts|audio|live|embedding|vision|exp|computer|robotics)", name):
+            if re.search(r"(image|tts|audio|live|embedding|vision|exp|computer|robotics|transcribe|banana|omni|argon|customtools)", name):
                 continue
             names.append(name)
     except Exception:
@@ -49,6 +59,36 @@ def available_models(client) -> list:
     return names or [DEFAULT_MODEL]
 
 
+def _probe(client, model: str) -> bool:
+    """طلب صغير جداً عشان نعرف الموديل ده بيرد بسرعة دلوقتي ولا عليه ضغط."""
+    try:
+        r = client.models.generate_content(
+            model=model, contents="ok",
+            config=types.GenerateContentConfig(
+                max_output_tokens=16, http_options=types.HttpOptions(timeout=PROBE_TIMEOUT_MS)))
+        return bool(r.candidates)
+    except Exception:
+        return False
+
+
+def pick_fast_model(client, models: list, max_probes: int = 6) -> str:
+    """
+    بيجرب أهم الموديلات (Flash الأول) في نفس الوقت، ويختار الأحدث من اللي ردوا.
+    بياخد ثواني بس مرة واحدة في أول المحادثة.
+    """
+    candidates = [m for m in models if "lite" not in m][:max_probes] or models[:max_probes]
+    with ThreadPoolExecutor(max_workers=len(candidates)) as pool:
+        futures = {pool.submit(_probe, client, m): m for m in candidates}
+        ok = {futures[f] for f in as_completed(futures) if f.result()}
+    for m in candidates:                 # نفس ترتيب الأولوية (الأحدث الأول)
+        if m in ok:
+            return m
+    for m in models:                     # لو كله عليه ضغط: نجرب الباقي (زي lite) واحد واحد
+        if m not in candidates and _probe(client, m):
+            return m
+    return candidates[0] if candidates else DEFAULT_MODEL
+
+
 def _schema(schema: dict) -> dict:
     """نسخة من الـ JSON Schema من غير additionalProperties (Gemini مش محتاجها)."""
     clean = {k: v for k, v in schema.items() if k != "additionalProperties"}
@@ -60,15 +100,22 @@ def _schema(schema: dict) -> dict:
 
 
 def _declarations():
+    # فحص علامات الخطر بيتعمل بالكود قبل الموديل، فمش محتاجين نصرف عليه طلب من الخطة المجانية
     return [
         types.FunctionDeclaration(name=t["name"], description=t["description"],
                                   parameters_json_schema=_schema(t["input_schema"]))
-        for t in TOOLS
+        for t in TOOLS if t["name"] != "check_red_flags"
     ]
 
 
+def _retry_delay(error) -> float:
+    """عدد الثواني اللي جوجل طالبة نستناها قبل ما نعيد الطلب (من رسالة الخطأ 429)."""
+    m = re.search(r"retryDelay['\"]?\s*:\s*['\"]?(\d+(?:\.\d+)?)s", str(error))
+    return float(m.group(1)) + 1 if m else 20.0
+
+
 def run_turn(client, history: list, user_text: str, profile: dict, chronic: list, on_tool=None,
-             model: str = DEFAULT_MODEL) -> dict:
+             model: str = DEFAULT_MODEL, on_wait=None) -> dict:
     """
     دور واحد من المحادثة بـ Gemini. history: قايمة types.Content (append-only).
     بيرجع {"text": رد شفاء, "events": [الأدوات اللي اتنفذت]} زي agent.run_turn بالظبط.
@@ -86,13 +133,33 @@ def run_turn(client, history: list, user_text: str, profile: dict, chronic: list
     )
     events = []
     for _ in range(MAX_STEPS):
-        try:
-            response = client.models.generate_content(model=model, contents=history, config=config)
-        except errors.APIError as e:
-            if e.code == 429:
-                return {"text": "⏳ وصلت للحد المسموح في الخطة المجانية بتاعة Gemini. استنى دقيقة وجرب تاني، "
-                                "أو استخدم تبويب المحرك المحلي.", "events": events}
-            raise
+        response = None
+        for attempt in range(2):         # محاولة تانية واحدة بس لو السيرفر عليه ضغط
+            try:
+                response = client.models.generate_content(model=model, contents=history, config=config)
+                break
+            except errors.APIError as e:
+                wait = _retry_delay(e)
+                if e.code == 429 and attempt == 0 and wait <= MAX_RATE_LIMIT_WAIT:
+                    # الخطة المجانية ليها حد في الدقيقة: نستنى الوقت اللي جوجل قالت عليه ونكمل لوحدنا
+                    if on_wait:
+                        on_wait(wait)
+                    time.sleep(wait)
+                    continue
+                if e.code not in TRANSIENT_CODES or attempt == 1:
+                    if e.code == 429:
+                        return {"text": "⏳ وصلت للحد المسموح في الخطة المجانية بتاعة Gemini. استنى دقيقة وابعت "
+                                        "رسالتك تاني، أو استخدم تبويب المحرك المحلي.", "events": events}
+                    if e.code in TRANSIENT_CODES:
+                        return {"text": "⏳ سيرفرات جوجل عليها ضغط دلوقتي. ابعت رسالتك تاني، أو دوس "
+                                        "\"محادثة جديدة\" عشان أختار موديل أسرع.", "events": events}
+                    raise
+            except Exception as e:      # انتهاء المهلة من غير رد من السيرفر
+                if "timeout" not in type(e).__name__.lower() or attempt == 1:
+                    if "timeout" in type(e).__name__.lower():
+                        return {"text": "⏳ الرد أخد وقت طويل. ابعت رسالتك تاني، أو دوس \"محادثة جديدة\" عشان "
+                                        "أختار موديل أسرع.", "events": events}
+                    raise
 
         if not response.candidates or response.candidates[0].content is None:
             return {"text": "معلش، مقدرش أرد على الرسالة دي. لو عندك أعراض احكيلي عنها 🙏", "events": events}

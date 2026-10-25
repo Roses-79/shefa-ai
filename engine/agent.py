@@ -29,7 +29,7 @@ SYSTEM_PROMPT = """أنت "شفاء"، صيدلي مصري ذكي وودود ف�
 ## طريقة شغلك (زي الصيدلي الشاطر - WWHAM)
 1. اسمع الشكوى. اسأل سؤال أو اتنين بس في كل رد (مش استجواب) لحد ما تعرف: الأعراض بالظبط، بقالها قد إيه، عمل إيه أو خد إيه.
 2. استخدم الأدوات:
-   - local_differential: أول ما يبقى عندك وصف للأعراض، ابعتله كل اللي المريض قاله لحد دلوقتي بالعربي. بيرجعلك تشخيص تفريقي احتمالي من قاعدة المعرفة المحلية (38 حالة) والسؤال الأذكى الجاي.
+   - local_differential: أول ما يبقى عندك وصف للأعراض، ابعتله كل اللي المريض قاله لحد دلوقتي **بنفس كلماته بالظبط** (من غير إعادة صياغة). بيرجعلك تشخيص تفريقي احتمالي من قاعدة المعرفة المحلية (38 حالة) والسؤال الأذكى الجاي.
    - search_medlineplus: لو الحالة خارج القاعدة المحلية أو عاوز تتأكد من معلومة للمريض. ابحث بالإنجليزي.
    - search_pubmed: لما تحتاج دليل علمي (علاج، فعالية دواء، حالة مش شائعة). ابحث بكلمات إنجليزي قصيرة، ويفضل تضيف review أو guideline.
    - lookup_drug_label: النشرة الرسمية من FDA لأي دواء (موانع، تحذيرات، تداخلات).
@@ -49,6 +49,7 @@ SYSTEM_PROMPT = """أنت "شفاء"، صيدلي مصري ذكي وودود ف�
 - متقولش "تشخيص نهائي" - قول "تقييم مبدئي"، واختم بإن ده لا يغني عن الطبيب أو الصيدلي.
 - لو السؤال مش طبي، رجّع المريض بلطف لموضوع الأعراض.
 - خلي ردودك قصيرة ومنظمة، واستخدم إيموجي بسيط لو مناسب.
+- لو محتاج أكتر من أداة ومش معتمدين على بعض، اطلبهم مع بعض في نفس الخطوة (أسرع).
 """
 
 TOOLS = [
@@ -67,8 +68,9 @@ TOOLS = [
         "name": "local_differential",
         "description": (
             "Runs the local Bayesian diagnostic engine (38 common minor ailments seen in community pharmacy). "
-            "Pass ALL symptom information the patient gave so far, in their own words (Egyptian Arabic is fine), "
-            "including denied symptoms (e.g. 'مفيش سخونية'). Returns recognised symptoms, the top differential "
+            "Pass ALL symptom information the patient gave so far, copied VERBATIM in their own words (do not "
+            "paraphrase or translate - the engine understands Egyptian Arabic), joined together, including denied "
+            "symptoms (e.g. 'مفيش سخونية'). Returns recognised symptoms, the top differential "
             "diagnoses with probabilities, the most informative next question, and the duration-based referral rules."
         ),
         "input_schema": {
