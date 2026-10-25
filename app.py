@@ -70,7 +70,8 @@ def reset_chat():
     st.session_state.complaint = ""
 
 
-if "messages" not in st.session_state:
+# لو الجلسة قديمة (من نسخة سابقة من البرنامج) وناقصها حاجة، نبدأ من جديد بدل ما يحصل خطأ
+if any(k not in st.session_state for k in ("messages", "known", "asked", "stage", "current_q", "duration", "complaint")):
     reset_chat()
 
 
@@ -108,17 +109,21 @@ with st.sidebar:
         except Exception:  # مفيش ملف secrets
             return ""
 
+    @st.cache_data(ttl=3600, show_spinner="بجيب موديلات Gemini المتاحة...")
+    def _gemini_models(api_key: str) -> list:
+        # متخزنة بالمفتاح نفسه (مش في session_state) عشان متحصلش مشكلة لو الصفحة اتحدثت وهي بتحمّل
+        return gemini_agent.available_models(gemini_agent.get_client(api_key))
+
     client, agent_client, agent_model = None, None, None
+    gemini_models = []
     if provider == "gemini":
         key = st.text_input("Google AI Studio API Key", type="password",
                             help="مجاني من aistudio.google.com ← Get API key") or _secret("GEMINI_API_KEY")
         agent_client = gemini_agent.get_client(key)
         if agent_client:
-            if st.session_state.get("gemini_models_key") != key:
-                st.session_state.gemini_models = gemini_agent.available_models(agent_client)
-                st.session_state.gemini_models_key = key
+            gemini_models = _gemini_models(key)
             agent_model = st.selectbox(
-                "الموديل", [gemini_agent.AUTO] + st.session_state.gemini_models,
+                "الموديل", [gemini_agent.AUTO] + gemini_models,
                 format_func=lambda m: "⚡ تلقائي (أسرع موديل متاح دلوقتي)" if m == gemini_agent.AUTO else m,
                 help="التلقائي بيجرب كذا موديل في أول المحادثة ويختار الأحدث اللي بيرد بسرعة "
                      "(الموديلات الجديدة ساعات بيبقى عليها ضغط).")
@@ -131,6 +136,7 @@ with st.sidebar:
     st.session_state.agent_client = agent_client
     st.session_state.agent_provider = provider
     st.session_state.agent_model = agent_model
+    st.session_state.agent_models = gemini_models
     if agent_client:
         st.success(f"الوكيل الذكي الأونلاين شغال ✅ ({agent_model})")
     else:
@@ -386,8 +392,8 @@ def reset_agent():
 
 
 # لو المزوّد أو الموديل اتغير نبدأ محادثة جديدة (صيغة الرسايل بتختلف من مزوّد للتاني)
-if ("agent_history" not in st.session_state
-        or st.session_state.agent_history_owner != (st.session_state.agent_provider, st.session_state.agent_model)):
+if ("agent_history" not in st.session_state or "agent_display" not in st.session_state
+        or st.session_state.get("agent_history_owner") != (st.session_state.agent_provider, st.session_state.agent_model)):
     reset_agent()
 
 
@@ -410,10 +416,10 @@ def agent_send(text: str):
             if st.session_state.agent_provider == "gemini":
                 model = st.session_state.agent_model
                 if model == gemini_agent.AUTO:
-                    if not st.session_state.gemini_active_model:
+                    if not st.session_state.get("gemini_active_model"):
                         status.write("⚡ بختار أسرع موديل Gemini متاح دلوقتي...")
                         st.session_state.gemini_active_model = gemini_agent.pick_fast_model(
-                            st.session_state.agent_client, st.session_state.gemini_models)
+                            st.session_state.agent_client, st.session_state.agent_models)
                         status.write(f"✅ الموديل: `{st.session_state.gemini_active_model}`")
                     model = st.session_state.gemini_active_model
                 out = gemini_agent.run_turn(
