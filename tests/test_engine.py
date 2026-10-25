@@ -330,3 +330,63 @@ class TestAgent(unittest.TestCase):
         status = {d["drug"]: d["status"] for d in r["drugs"]}
         self.assertEqual(status["ibuprofen"], "excluded")
         self.assertEqual(status["Daflon"], "allowed")
+
+
+# ---------------------------------------------------------------------------
+# الوكيل بعقل Gemini (بأنواع google-genai الحقيقية وسيرفر وهمي)
+# ---------------------------------------------------------------------------
+class TestGeminiAgent(unittest.TestCase):
+    def setUp(self):
+        from engine import gemini_agent
+        if gemini_agent.genai is None:
+            self.skipTest("google-genai not installed")
+        self.ga = gemini_agent
+
+    def test_tool_declarations_valid(self):
+        decls = self.ga._declarations()
+        self.assertEqual(len(decls), 6)
+        self.assertNotIn("additionalProperties", str(decls[0].parameters_json_schema))
+
+    def test_loop(self):
+        from types import SimpleNamespace as NS
+        from google.genai import types
+
+        def reply(parts):
+            return types.GenerateContentResponse(candidates=[types.Candidate(content=types.Content(role="model", parts=parts))])
+
+        def call(name, args):
+            return types.Part(function_call=types.FunctionCall(id=f"c_{name}", name=name, args=args))
+
+        script = [
+            reply([call("local_differential", {"patient_text": "رجلي بتوجعني من الوقفة", "duration_days": 3})]),
+            reply([call("check_drug_safety", {"drugs": ["Brufen", "Panadol"]})]),
+            reply([types.Part(text="التقييم المبدئي: إجهاد عضلي")]),
+        ]
+        calls = []
+
+        def generate_content(**kw):
+            calls.append(kw)
+            return script[len(calls) - 1]
+
+        client = NS(models=NS(generate_content=generate_content))
+        history = []
+        out = self.ga.run_turn(client, history, "رجلي بتوجعني من الوقفة",
+                               {"age": 40, "sex": "male", "weight": 80, "conditions": ["peptic_ulcer"]}, ["warfarin"])
+        self.assertEqual(out["text"], "التقييم المبدئي: إجهاد عضلي")
+        self.assertEqual([e["tool"] for e in out["events"]], ["local_differential", "check_drug_safety"])
+        self.assertIn("🚫", out["events"][1]["summary"])
+        self.assertEqual([c.role for c in history], ["user", "model", "user", "model", "user", "model"])
+        fr = history[2].parts[0].function_response
+        self.assertEqual((fr.id, fr.name), ("c_local_differential", "local_differential"))
+        self.assertTrue(calls[0]["config"].automatic_function_calling.disable)
+
+    def test_model_ranking(self):
+        from types import SimpleNamespace as NS
+        models = [NS(name=f"models/{n}", supported_actions=["generateContent"]) for n in
+                  ["gemini-2.0-flash", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite",
+                   "gemini-2.5-flash-image", "text-embedding-004"]]
+        client = NS(models=NS(list=lambda: models))
+        names = self.ga.available_models(client)
+        self.assertEqual(names[0], "gemini-2.5-flash")
+        self.assertNotIn("gemini-2.5-flash-image", names)
+        self.assertNotIn("text-embedding-004", names)

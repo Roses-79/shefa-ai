@@ -6,7 +6,7 @@
 """
 import streamlit as st
 
-from engine import agent, ai_assistant, diagnosis, nlp, safety
+from engine import agent, ai_assistant, diagnosis, gemini_agent, nlp, safety
 from engine.knowledge_base import (
     CHRONIC_MEDS, CONDITIONS, DRUGS, EMERGENCY_NUMBERS, INTERACTIONS, PATIENT_CONDITIONS, RED_FLAGS, SYMPTOMS,
 )
@@ -98,21 +98,40 @@ with st.sidebar:
     st.session_state.chronic = chronic
 
     st.divider()
-    st.markdown("## 🤖 الذكاء الاصطناعي التوليدي")
-    api_key = st.text_input("Anthropic API Key", type="password",
-                            help="بيشغّل الوكيل الذكي الأونلاين (Claude + PubMed + MedlinePlus + FDA). "
-                                 "من غيره المحرك المحلي الأوفلاين شغال كامل.")
-    if not api_key:
+    st.markdown("## 🤖 عقل الوكيل الذكي")
+    provider = st.radio("المزوّد", ["gemini", "claude"], horizontal=True,
+                        format_func=lambda x: {"gemini": "Google Gemini (مجاني)", "claude": "Anthropic Claude"}[x])
+
+    def _secret(name):
         try:
-            api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+            return st.secrets.get(name, "")
         except Exception:  # مفيش ملف secrets
-            api_key = ""
-    client = ai_assistant.get_client(api_key)
-    st.session_state.client = client
-    if client:
-        st.success("الوكيل الذكي الأونلاين شغال ✅")
+            return ""
+
+    client, agent_client, agent_model = None, None, None
+    if provider == "gemini":
+        key = st.text_input("Google AI Studio API Key", type="password",
+                            help="مجاني من aistudio.google.com ← Get API key") or _secret("GEMINI_API_KEY")
+        agent_client = gemini_agent.get_client(key)
+        if agent_client:
+            if st.session_state.get("gemini_models_key") != key:
+                st.session_state.gemini_models = gemini_agent.available_models(agent_client)
+                st.session_state.gemini_models_key = key
+            agent_model = st.selectbox("الموديل", st.session_state.gemini_models,
+                                       help="موديلات Flash عليها الخطة المجانية")
     else:
-        st.info("المحرك المحلي الأوفلاين شغال ✅ — حط API Key عشان تشغّل الوكيل الأونلاين.")
+        key = st.text_input("Anthropic API Key", type="password",
+                            help="من console.anthropic.com (مدفوع)") or _secret("ANTHROPIC_API_KEY")
+        client = agent_client = ai_assistant.get_client(key)
+        agent_model = agent.MODEL
+    st.session_state.client = client                    # فهم الكلام الحر في المحرك المحلي (Claude بس)
+    st.session_state.agent_client = agent_client
+    st.session_state.agent_provider = provider
+    st.session_state.agent_model = agent_model
+    if agent_client:
+        st.success(f"الوكيل الذكي الأونلاين شغال ✅ ({agent_model})")
+    else:
+        st.info("المحرك المحلي الأوفلاين شغال ✅ — حط المفتاح عشان تشغّل الوكيل الأونلاين.")
 
     st.divider()
     st.markdown("## 🚑 أرقام الطوارئ")
@@ -357,11 +376,14 @@ AGENT_GREETING = (
 
 
 def reset_agent():
-    st.session_state.agent_history = []          # الرسايل بصيغة Claude API
+    st.session_state.agent_history = []          # الرسايل بصيغة الـ API بتاع المزوّد
     st.session_state.agent_display = [{"role": "assistant", "content": AGENT_GREETING}]
+    st.session_state.agent_history_owner = (st.session_state.get("agent_provider"), st.session_state.get("agent_model"))
 
 
-if "agent_history" not in st.session_state:
+# لو المزوّد أو الموديل اتغير نبدأ محادثة جديدة (صيغة الرسايل بتختلف من مزوّد للتاني)
+if ("agent_history" not in st.session_state
+        or st.session_state.agent_history_owner != (st.session_state.agent_provider, st.session_state.agent_model)):
     reset_agent()
 
 
@@ -379,11 +401,20 @@ def agent_send(text: str):
         def on_tool(ev):
             status.write(f"{ev['label']}: `{ev['input'].get('query') or ev['input'].get('generic_name') or ''}`")
         try:
-            out = agent.run_turn(st.session_state.client, st.session_state.agent_history, text,
-                                 st.session_state.profile, st.session_state.chronic, on_tool=on_tool)
+            args = (st.session_state.agent_client, st.session_state.agent_history, text,
+                    st.session_state.profile, st.session_state.chronic)
+            if st.session_state.agent_provider == "gemini":
+                out = gemini_agent.run_turn(*args, on_tool=on_tool, model=st.session_state.agent_model)
+            else:
+                out = agent.run_turn(*args, on_tool=on_tool)
         except Exception as e:
-            out = {"text": f"⚠️ حصلت مشكلة في الاتصال بالوكيل ({type(e).__name__}). اتأكد من الـ API Key والنت، "
-                           "أو استخدم تبويب المحرك المحلي الأوفلاين.", "events": []}
+            msg = f"{type(e).__name__} {e}"
+            if any(k in msg for k in ("API key not valid", "API_KEY_INVALID", "AuthenticationError", "invalid x-api-key")):
+                text_err = "🔑 المفتاح غلط. انسخه تاني بالظبط من الموقع وحطه في الشريط الجانبي."
+            else:
+                text_err = (f"⚠️ حصلت مشكلة في الاتصال بالوكيل ({type(e).__name__}: {str(e)[:150]}). "
+                            "اتأكد من المفتاح والنت، أو استخدم تبويب المحرك المحلي الأوفلاين.")
+            out = {"text": text_err, "events": []}
         status.update(label="✅ خلصت", state="complete", expanded=False)
     st.session_state.agent_display.append({"role": "assistant", "content": out["text"], "events": out["events"]})
 
@@ -403,11 +434,11 @@ tab_agent, tab_chat, tab_inter, tab_peds, tab_how = st.tabs(
 )
 
 with tab_agent:
-    if not st.session_state.client:
+    if not st.session_state.agent_client:
         st.markdown(
-            "<div class='card amber'><b>🔑 الوكيل الذكي محتاج Anthropic API Key</b><br>"
-            "الوكيل بيستخدم Claude كعقل، وبيدور بنفسه في PubMed و MedlinePlus ونشرات FDA.<br>"
-            "حط المفتاح في الشريط الجانبي (من console.anthropic.com).<br>"
+            "<div class='card amber'><b>🔑 الوكيل الذكي محتاج مفتاح API</b><br>"
+            "الوكيل بيستخدم Gemini أو Claude كعقل، وبيدور بنفسه في PubMed و MedlinePlus ونشرات FDA.<br>"
+            "أسهل حاجة: مفتاح <b>مجاني</b> من <b>aistudio.google.com</b> ← Get API key، وحطه في الشريط الجانبي.<br>"
             "لحد ما تحطه، تبويب <b>المحرك المحلي (أوفلاين)</b> شغال كامل من غير نت.</div>",
             unsafe_allow_html=True,
         )
