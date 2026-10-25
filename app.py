@@ -116,9 +116,17 @@ with st.sidebar:
 
     client, agent_client, agent_model = None, None, None
     gemini_models = []
+    def _key_input(label: str, help_text: str, secret_name: str) -> str:
+        """لو المفتاح متخزن في Secrets بتاعة Streamlit Cloud محدش محتاج يكتبه، وخانة المفتاح بتبقى اختيارية."""
+        if _secret(secret_name):
+            st.success("🔑 مفتاح المشروع شغال — مش محتاج تحط مفتاح")
+            with st.expander("استخدام مفتاح تاني (اختياري)"):
+                own = st.text_input(label, type="password", help=help_text)
+            return own or _secret(secret_name)
+        return st.text_input(label, type="password", help=help_text)
+
     if provider == "gemini":
-        key = st.text_input("Google AI Studio API Key", type="password",
-                            help="مجاني من aistudio.google.com ← Get API key") or _secret("GEMINI_API_KEY")
+        key = _key_input("Google AI Studio API Key", "مجاني من aistudio.google.com ← Get API key", "GEMINI_API_KEY")
         agent_client = gemini_agent.get_client(key)
         if agent_client:
             gemini_models = _gemini_models(key)
@@ -128,8 +136,7 @@ with st.sidebar:
                 help="التلقائي بيجرب كذا موديل في أول المحادثة ويختار الأحدث اللي بيرد بسرعة "
                      "(الموديلات الجديدة ساعات بيبقى عليها ضغط).")
     else:
-        key = st.text_input("Anthropic API Key", type="password",
-                            help="من console.anthropic.com (مدفوع)") or _secret("ANTHROPIC_API_KEY")
+        key = _key_input("Anthropic API Key", "من console.anthropic.com (مدفوع)", "ANTHROPIC_API_KEY")
         client = agent_client = ai_assistant.get_client(key)
         agent_model = agent.MODEL
     st.session_state.client = client                    # فهم الكلام الحر في المحرك المحلي (Claude بس)
