@@ -77,7 +77,7 @@ SYMPTOMS = {
     "nasal_congestion": {
         "name": "انسداد الأنف (زكام)",
         "question": "هل مناخيرك مسدودة؟",
-        "synonyms": ["زكام", "مسدوده", "مناخيري مسدوده", "انسداد", "انفي مقفول", "مزكم", "congestion", "blocked nose", "stuffy nose"],
+        "synonyms": ["زكام", "مناخيري مسدوده", "انفي مسدود", "مناخيري مقفوله", "انسداد", "انفي مقفول", "مزكم", "congestion", "blocked nose", "stuffy nose"],
     },
     "sneezing": {
         "name": "عطس متكرر",
@@ -533,7 +533,7 @@ UNKNOWN_CONDITION = {
 }
 
 # احتمال وجود عرض مش مذكور لحالة معينة (Leak probability)
-LEAK_PROBABILITY = 0.02
+LEAK_PROBABILITY = 0.005
 
 # ---------------------------------------------------------------------------
 # 3) الأدوية بدون روشتة (OTC)
@@ -1127,3 +1127,18 @@ EMERGENCY_NUMBERS = {
     "الطوارئ / النجدة": "122",
     "الخط الساخن للصحة النفسية": "08008880700",
 }
+
+# ---------------------------------------------------------------------------
+# 8) التوسعة: حالات العضلات والعظام والجلد والفم والأذن وصحة المرأة والنوم
+# ---------------------------------------------------------------------------
+from .knowledge_extended import (  # noqa: E402
+    EXTRA_CONDITIONS, EXTRA_DRUGS, EXTRA_INTERACTIONS, EXTRA_RED_FLAGS, EXTRA_SYMPTOMS, ORIGINAL_SOURCES,
+)
+
+SYMPTOMS.update(EXTRA_SYMPTOMS)
+CONDITIONS.update(EXTRA_CONDITIONS)
+DRUGS.update(EXTRA_DRUGS)
+INTERACTIONS.extend(EXTRA_INTERACTIONS)
+RED_FLAGS.extend(EXTRA_RED_FLAGS)
+for _cid, _src in ORIGINAL_SOURCES.items():
+    CONDITIONS[_cid].setdefault("source", _src)

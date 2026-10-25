@@ -44,6 +44,17 @@ def adjusted_priors(profile: dict) -> dict:
         priors["migraine"] *= 0.5
         priors["gerd"] *= 0.3
         priors["gastroenteritis"] *= 1.5
+    if age > 3:
+        priors["nappy_rash"] = 0.0
+    if sex == "male" or age < 12:
+        priors["vaginal_thrush"] = 0.0
+    if age < 12:
+        priors["threadworms"] *= 3       # الديدان الدبوسية أشهر في الأطفال
+        priors["low_back_pain"] *= 0.2
+        priors["varicose_veins"] = 0.0
+    if age > 40:
+        priors["acne"] *= 0.3
+        priors["varicose_veins"] *= 2
     if age > 60:
         priors["influenza"] *= 1.2
         priors["constipation"] *= 1.5
@@ -98,7 +109,9 @@ def next_question(known: dict, asked: set, priors: dict):
     بنحصر البحث في الأعراض المرتبطة بأعلى 5 حالات عشان الأسئلة تبقى منطقية.
     """
     current = posterior(known, priors)
-    top_conditions = [cid for cid in list(current)[:5] if cid != UNKNOWN_ID]
+    top_p = next(iter(current.values()))
+    top_conditions = [cid for cid in list(current)[:5]
+                      if cid != UNKNOWN_ID and current[cid] >= max(0.03, top_p * 0.1)]
     candidates = set()
     for cid in top_conditions:
         candidates.update(CONDITIONS[cid]["likelihoods"].keys())

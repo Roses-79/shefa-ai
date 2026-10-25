@@ -176,3 +176,157 @@ class TestKnowledgeBaseIntegrity(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# التوسعة: حالات العضلات والجلد والفم والأذن...
+# ---------------------------------------------------------------------------
+class TestExtendedKnowledge(unittest.TestCase):
+    def test_leg_pain_from_standing(self):
+        # الجملة اللي كان النظام مش بيفهمها
+        found = nlp.extract_symptoms("انا رجلي بتوجعني جامد من الوقفة في الشغل")
+        self.assertTrue(found["leg_pain"])
+        self.assertTrue(found["prolonged_standing"])
+        post = diagnosis.posterior(found, diagnosis.adjusted_priors(ADULT_M))
+        self.assertIn(next(iter(post)), {"muscle_strain", "varicose_veins"})
+
+    def test_ear_not_confused_with_nose(self):
+        found = nlp.extract_symptoms("ودني مسدوده")
+        self.assertEqual(found, {"ear_blocked": True})
+
+    def test_negation_inside_phrase(self):
+        found = nlp.extract_symptoms("مناخيري مش مسدوده بس برشح")
+        self.assertFalse(found["nasal_congestion"])
+        self.assertTrue(found["runny_nose"])
+
+    def test_new_red_flags(self):
+        ids = [f["id"] for f in nlp.detect_red_flags("رجلي وارمه وحمرا وسخنه")]
+        self.assertIn("dvt", ids)
+        ids = [f["id"] for f in nlp.detect_red_flags("ضهري بيوجعني ومش قادر اتحكم في البول")]
+        self.assertIn("cauda_equina", ids)
+
+    def test_new_vignettes(self):
+        cases = [
+            ("انا رجلي بتوجعني جامد من الوقفة في الشغل", "varicose_veins"),
+            ("انا رجلي بتوجعني جامد من الوقفة في الشغل", "muscle_strain"),
+            ("ضهري بيوجعني من ساعة ما شلت حاجه تقيله", "low_back_pain"),
+            ("اتلوت رجلي ووارمه", "ankle_sprain"),
+            ("كعب رجلي بيوجعني", "plantar_fasciitis"),
+            ("شد في رجلي", "leg_cramps"),
+            ("عندي حب الشباب", "acne"),
+            ("جلدي ناشف وبياكلني", "eczema"),
+            ("ارتكاريا", "urticaria"),
+            ("فقاقيع على شفايفي", "cold_sores"),
+            ("قعدت في الشمس وجلدي احمر", "sunburn"),
+            ("عندي قشره", "dandruff"),
+            ("عندي قرحه في بقي", "mouth_ulcers"),
+            ("ودني مسدوده", "ear_wax"),
+            ("سناني بتوجعني", "toothache"),
+            ("هرش ورا بالليل", "threadworms"),
+            ("بدوخ في العربيه", "motion_sickness"),
+            ("هرش في المنطقه الحساسه", "vaginal_thrush"),
+            ("مش عارف انام", "insomnia"),
+        ]
+        correct = sum(simulate(text, ADULT_F, truth)[0] == truth for text, truth in cases)
+        print(f"\nExtended vignette accuracy: {correct}/{len(cases)}")
+        self.assertGreaterEqual(correct / len(cases), 0.85)
+
+    def test_age_sex_rules(self):
+        self.assertEqual(diagnosis.adjusted_priors({"age": 30, "sex": "female"})["nappy_rash"], 0)
+        self.assertEqual(diagnosis.adjusted_priors(ADULT_M)["vaginal_thrush"], 0)
+
+    def test_every_condition_has_source(self):
+        for cid, c in CONDITIONS.items():
+            self.assertTrue(c.get("source"), cid)
+
+
+# ---------------------------------------------------------------------------
+# المصادر الأونلاين (اختبار قراءة الردود بعينات بنفس شكل الردود الحقيقية - من غير نت)
+# ---------------------------------------------------------------------------
+PUBMED_XML = b"""<?xml version="1.0"?><PubmedArticleSet><PubmedArticle><MedlineCitation><PMID>12345</PMID>
+<Article><Journal><Title>BMJ</Title><JournalIssue><PubDate><Year>2023</Year></PubDate></JournalIssue></Journal>
+<ArticleTitle>Plantar heel pain: a <i>systematic</i> review.</ArticleTitle>
+<Abstract><AbstractText Label="BACKGROUND">Heel pain is common.</AbstractText><AbstractText>Stretching helps.</AbstractText></Abstract>
+<PublicationTypeList><PublicationType>Journal Article</PublicationType><PublicationType>Review</PublicationType></PublicationTypeList>
+</Article></MedlineCitation></PubmedArticle></PubmedArticleSet>"""
+
+MEDLINEPLUS_XML = b"""<?xml version="1.0"?><nlmSearchResult><list num="1"><document rank="0" url="https://medlineplus.gov/varicoseveins.html">
+<content name="title">&lt;span class="qt0"&gt;Varicose&lt;/span&gt; Veins</content>
+<content name="FullSummary">&lt;p&gt;Varicose veins are swollen, twisted veins.&lt;/p&gt;</content></document></list></nlmSearchResult>"""
+
+
+class TestOnlineParsers(unittest.TestCase):
+    def test_pubmed(self):
+        from engine.online_sources import parse_pubmed_xml
+        r = parse_pubmed_xml(PUBMED_XML)[0]
+        self.assertEqual(r["pmid"], "12345")
+        self.assertEqual(r["year"], "2023")
+        self.assertIn("systematic", r["title"])
+        self.assertIn("Stretching helps", r["abstract"])
+        self.assertEqual(r["type"], "Review")
+        self.assertEqual(r["url"], "https://pubmed.ncbi.nlm.nih.gov/12345/")
+
+    def test_medlineplus(self):
+        from engine.online_sources import parse_medlineplus_xml
+        r = parse_medlineplus_xml(MEDLINEPLUS_XML)[0]
+        self.assertEqual(r["title"], "Varicose Veins")
+        self.assertEqual(r["summary"], "Varicose veins are swollen, twisted veins.")
+
+    def test_openfda(self):
+        from engine.online_sources import parse_openfda
+        data = {"results": [{"openfda": {"brand_name": ["Advil"]}, "warnings": ["Stomach bleeding warning"],
+                             "do_not_use": ["right before or after heart surgery"]}]}
+        r = parse_openfda("ibuprofen", data)
+        self.assertEqual(r["brand_names"], ["Advil"])
+        self.assertIn("Stomach bleeding", r["warnings"])
+        self.assertIn("error", parse_openfda("x", {"results": []}))
+
+
+# ---------------------------------------------------------------------------
+# الوكيل الذكي (بعميل Claude وهمي بيمثل سيناريو كامل)
+# ---------------------------------------------------------------------------
+class _FakeMessages:
+    def __init__(self, script):
+        self.script, self.calls = script, []
+
+    def create(self, **kwargs):
+        from types import SimpleNamespace as NS
+        self.calls.append(kwargs)
+        step = self.script[len(self.calls) - 1]
+        blocks = [NS(type="tool_use", id=f"t{i}", name=n, input=a) for i, (n, a) in enumerate(step.get("tools", []))]
+        if "text" in step:
+            blocks.append(NS(type="text", text=step["text"]))
+        return NS(content=blocks, stop_reason="tool_use" if blocks and blocks[0].type == "tool_use" else "end_turn")
+
+
+class TestAgent(unittest.TestCase):
+    def run_agent(self, script, profile, chronic):
+        from types import SimpleNamespace as NS
+        from engine import agent
+        client = NS(beta=NS(messages=_FakeMessages(script)))
+        history = []
+        out = agent.run_turn(client, history, "رجلي بتوجعني من الوقفة", profile, chronic)
+        return out, history, client.beta.messages.calls
+
+    def test_agent_loop_and_safety_tool(self):
+        script = [
+            {"tools": [("local_differential", {"patient_text": "رجلي بتوجعني من الوقفة", "duration_days": 3})]},
+            {"tools": [("check_drug_safety", {"drugs": ["Brufen", "Voltaren", "Panadol", "amoxicillin"]})]},
+            {"text": "التقييم المبدئي: إجهاد عضلي"},
+        ]
+        out, history, calls = self.run_agent(script, {"age": 40, "sex": "male", "weight": 80,
+                                                       "conditions": ["peptic_ulcer"]}, ["warfarin"])
+        self.assertEqual(out["text"], "التقييم المبدئي: إجهاد عضلي")
+        self.assertEqual([e["tool"] for e in out["events"]], ["local_differential", "check_drug_safety"])
+        self.assertIn("🚫", out["events"][1]["summary"])          # Brufen ممنوع مع القرحة
+        self.assertIn("❔", out["events"][1]["summary"])          # amoxicillin مش OTC
+        self.assertEqual([m["role"] for m in history], ["user", "assistant", "user", "assistant", "user", "assistant"])
+        self.assertIn("قرحة", history[0]["content"][0]["text"])   # ملف المريض بيوصل للوكيل
+        self.assertEqual(calls[0]["model"], "claude-opus-5-5")
+
+    def test_drug_safety_tool(self):
+        from engine.agent import tool_check_drug_safety
+        r = tool_check_drug_safety(["ibuprofen", "Daflon"], {"age": 30, "conditions": ["pregnancy"]}, ["warfarin"])
+        status = {d["drug"]: d["status"] for d in r["drugs"]}
+        self.assertEqual(status["ibuprofen"], "excluded")
+        self.assertEqual(status["Daflon"], "allowed")

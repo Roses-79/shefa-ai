@@ -39,8 +39,14 @@ def _is_english(word: str) -> bool:
     return bool(re.match(r"^[a-z0-9' ]+$", word))
 
 
+_INNER_NEG = r"(?:\s+(?P<neg>مش|مو|مكانش|مبقاش|not))?"
+
+
 def _find(text: str, synonym: str):
-    """يرجع مكان أول ظهور للمرادف في النص (أو None)."""
+    """
+    يرجع (مكان أول ظهور للمرادف, هل في نفي جوه العبارة) أو None.
+    النفي جوه العبارة: "مناخيري مش مسدوده" بتطابق "مناخيري مسدوده" بس منفية.
+    """
     syn = normalize(synonym)
     if not syn:
         return None
@@ -50,9 +56,12 @@ def _find(text: str, synonym: str):
         # الكلمات القصيرة لازم تكون كلمة مستقلة عشان ميحصلش تطابق غلط
         pattern = r"(?:^|\s)(?:و|ف|ب|ال|وال|بال)?" + re.escape(syn) + r"(?=\s|$)"
     else:
-        pattern = re.escape(syn)
+        first, _, rest = syn.partition(" ")
+        pattern = re.escape(first) + (_INNER_NEG + r"\s+" + re.escape(rest) if rest else "")
     m = re.search(pattern, text)
-    return m.start() if m else None
+    if not m:
+        return None
+    return m.start(), bool(m.groupdict().get("neg"))
 
 
 def _negated(text: str, position: int) -> bool:
@@ -65,6 +74,15 @@ def _negated(text: str, position: int) -> bool:
     return False
 
 
+def _match(text: str, synonym: str):
+    """يرجع None لو مفيش تطابق، أو True لو العرض موجود، أو False لو منفي."""
+    hit = _find(text, synonym)
+    if hit is None:
+        return None
+    pos, inner_neg = hit
+    return not (inner_neg or _negated(text, pos))
+
+
 def extract_symptoms(text: str) -> dict:
     """
     يرجع dict: {symptom_id: True/False}
@@ -75,9 +93,9 @@ def extract_symptoms(text: str) -> dict:
     found = {}
     for sid, info in SYMPTOMS.items():
         for syn in info["synonyms"]:
-            pos = _find(clean, syn)
-            if pos is not None:
-                found[sid] = not _negated(clean, pos)
+            present = _match(clean, syn)
+            if present is not None:
+                found[sid] = present
                 break
 
     # درجة الحرارة لو مكتوبة كرقم: "حرارتي 39" أو "38.5 درجة"
@@ -136,8 +154,7 @@ def detect_red_flags(text: str) -> list:
     hits = []
     for flag in RED_FLAGS:
         for kw in flag["keywords"]:
-            pos = _find(clean, kw)
-            if pos is not None and not _negated(clean, pos):
+            if _match(clean, kw):
                 hits.append(flag)
                 break
     return hits

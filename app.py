@@ -6,7 +6,7 @@
 """
 import streamlit as st
 
-from engine import ai_assistant, diagnosis, nlp, safety
+from engine import agent, ai_assistant, diagnosis, nlp, safety
 from engine.knowledge_base import (
     CHRONIC_MEDS, CONDITIONS, DRUGS, EMERGENCY_NUMBERS, INTERACTIONS, PATIENT_CONDITIONS, RED_FLAGS, SYMPTOMS,
 )
@@ -99,14 +99,20 @@ with st.sidebar:
 
     st.divider()
     st.markdown("## 🤖 الذكاء الاصطناعي التوليدي")
-    api_key = st.text_input("Anthropic API Key (اختياري)", type="password",
-                            help="من غيره النظام شغال كامل أوفلاين. لو حطيته Claude بيفهم الكلام الحر أحسن ويكتب شرح ودود.")
+    api_key = st.text_input("Anthropic API Key", type="password",
+                            help="بيشغّل الوكيل الذكي الأونلاين (Claude + PubMed + MedlinePlus + FDA). "
+                                 "من غيره المحرك المحلي الأوفلاين شغال كامل.")
+    if not api_key:
+        try:
+            api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+        except Exception:  # مفيش ملف secrets
+            api_key = ""
     client = ai_assistant.get_client(api_key)
     st.session_state.client = client
     if client:
-        st.success("وضع AI الهجين شغال ✅")
+        st.success("الوكيل الذكي الأونلاين شغال ✅")
     else:
-        st.info("الوضع الأوفلاين (محرك احتمالي + قاعدة معرفة) ✅")
+        st.info("المحرك المحلي الأوفلاين شغال ✅ — حط API Key عشان تشغّل الوكيل الأونلاين.")
 
     st.divider()
     st.markdown("## 🚑 أرقام الطوارئ")
@@ -234,7 +240,7 @@ def finish(priors):
         "refer_if": CONDITIONS[top_id]["refer_if"] if top_id in CONDITIONS else [],
     }
     result = {
-        "top": top_id, "top_p": top_p,
+        "top": top_id, "top_p": top_p, "source": CONDITIONS.get(top_id, {}).get("source", ""),
         "ranking": [(diagnosis.condition_name(c), p) for c, p in ranking[:5]],
         "reasons": diagnosis.explain(top_id, known),
         "plan": plan,
@@ -333,9 +339,53 @@ def render_result(r, idx):
         st.markdown("#### 🤖 كلمة من شفاء")
         st.info(r["ai_text"])
 
+    if r.get("source"):
+        st.caption(f"📚 مصدر معلومات الحالة: {r['source']}")
     st.download_button("📄 نزّل التقرير (HTML - يتطبع PDF)", r["report"], file_name="shefa_report.html",
                        mime="text/html", key=f"dl_{idx}")
     st.caption("⚠️ ده تقييم مبدئي تعليمي ولا يغني عن الطبيب أو الصيدلي.")
+
+
+# ---------------------------------------------------------------------------
+# الوكيل الذكي الأونلاين
+# ---------------------------------------------------------------------------
+AGENT_GREETING = (
+    "أهلاً بيك! أنا **شفاء** 🤖 — الوكيل الذكي.\n\n"
+    "احكيلي بتحس بإيه بالعامية زي ما انت بتتكلم. هسألك كام سؤال، وهدوّر بنفسي في **PubMed** و**MedlinePlus** "
+    "ونشرات **FDA**، وكل دواء هقترحه هيعدي الأول على فحص الأمان المحلي (أمراضك وأدويتك والتداخلات)."
+)
+
+
+def reset_agent():
+    st.session_state.agent_history = []          # الرسايل بصيغة Claude API
+    st.session_state.agent_display = [{"role": "assistant", "content": AGENT_GREETING}]
+
+
+if "agent_history" not in st.session_state:
+    reset_agent()
+
+
+def agent_send(text: str):
+    text = text.strip()
+    if not text:
+        return
+    st.session_state.agent_display.append({"role": "user", "content": text})
+    # حاجز أمان بالكود: علامات الخطر بتتفحص قبل ما الرسالة توصل لـ Claude
+    flags = nlp.detect_red_flags(text)
+    if flags:
+        st.session_state.agent_display.append({"role": "assistant", "kind": "emergency", "flags": [f["id"] for f in flags]})
+        return
+    with st.status("🧠 شفاء بيفكر ويدوّر...", expanded=True) as status:
+        def on_tool(ev):
+            status.write(f"{ev['label']}: `{ev['input'].get('query') or ev['input'].get('generic_name') or ''}`")
+        try:
+            out = agent.run_turn(st.session_state.client, st.session_state.agent_history, text,
+                                 st.session_state.profile, st.session_state.chronic, on_tool=on_tool)
+        except Exception as e:
+            out = {"text": f"⚠️ حصلت مشكلة في الاتصال بالوكيل ({type(e).__name__}). اتأكد من الـ API Key والنت، "
+                           "أو استخدم تبويب المحرك المحلي الأوفلاين.", "events": []}
+        status.update(label="✅ خلصت", state="complete", expanded=False)
+    st.session_state.agent_display.append({"role": "assistant", "content": out["text"], "events": out["events"]})
 
 
 # ---------------------------------------------------------------------------
@@ -347,9 +397,54 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-tab_chat, tab_inter, tab_peds, tab_how = st.tabs(
-    ["💬 المساعد الذكي", "⚡ فاحص التداخلات", "👶 جرعات الأطفال", "🧠 إزاي النظام بيفكر"]
+tab_agent, tab_chat, tab_inter, tab_peds, tab_how = st.tabs(
+    ["🤖 الوكيل الذكي (أونلاين)", "💬 المحرك المحلي (أوفلاين)", "⚡ فاحص التداخلات", "👶 جرعات الأطفال",
+     "🧠 إزاي النظام بيفكر"]
 )
+
+with tab_agent:
+    if not st.session_state.client:
+        st.markdown(
+            "<div class='card amber'><b>🔑 الوكيل الذكي محتاج Anthropic API Key</b><br>"
+            "الوكيل بيستخدم Claude كعقل، وبيدور بنفسه في PubMed و MedlinePlus ونشرات FDA.<br>"
+            "حط المفتاح في الشريط الجانبي (من console.anthropic.com).<br>"
+            "لحد ما تحطه، تبويب <b>المحرك المحلي (أوفلاين)</b> شغال كامل من غير نت.</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        for m in st.session_state.agent_display:
+            with st.chat_message(m["role"], avatar="🤖" if m["role"] == "assistant" else "🙂"):
+                if m.get("kind") == "emergency":
+                    render_emergency(m["flags"])
+                    continue
+                if m.get("events"):
+                    with st.expander(f"🔎 اللي عمله الوكيل ({len(m['events'])} خطوة)"):
+                        for ev in m["events"]:
+                            arg = ev["input"].get("query") or ev["input"].get("generic_name") or ", ".join(ev["input"].get("drugs", []))
+                            st.markdown(f"**{ev['label']}** {f'`{arg}`' if arg else ''}")
+                            if ev["summary"]:
+                                st.markdown(ev["summary"])
+                st.markdown(m["content"])
+        if len(st.session_state.agent_display) == 1:
+            st.markdown("**جرّب:**")
+            agent_examples = {
+                "🦵 وجع رجلي من الوقفة": "انا رجلي بتوجعني جامد من الوقفة في الشغل",
+                "🤧 رشح وعطس": "عندي رشح وعطس وزوري بيوجعني من يومين",
+                "🤢 إسهال": "عندي اسهال ومغص من امبارح بعد ما اكلت من بره",
+                "😴 مش عارف انام": "بقالي أسبوعين مش عارف انام كويس",
+            }
+            cols = st.columns(len(agent_examples))
+            for col, (label, txt) in zip(cols, agent_examples.items()):
+                if col.button(label, key=f"ag_{label}", width="stretch"):
+                    agent_send(txt)
+                    st.rerun()
+        else:
+            st.button("🔄 محادثة جديدة", on_click=reset_agent, key="agent_reset")
+        agent_text = st.chat_input("اكتب الأعراض بالعامية...", key="agent_input")
+        if agent_text:
+            agent_send(agent_text)
+            st.rerun()
+        st.caption("⚠️ تقييم مبدئي تعليمي ولا يغني عن الطبيب أو الصيدلي.")
 
 with tab_chat:
     col_chat, col_live = st.columns([2.2, 1])
@@ -376,6 +471,7 @@ with tab_chat:
                 "🤢 إسهال ومغص": "عندي اسهال ومغص بعد ما اكلت من بره من يوم",
                 "🔥 حموضة": "عندي حموضة وحرقان في صدري بعد الاكل بقالها اسبوع",
                 "🤕 صداع": "عندي صداع نصفي بيدق والنور بيضايقني",
+                "🦵 وجع رجل": "انا رجلي بتوجعني جامد من الوقفة في الشغل",
             }
             cols = st.columns(len(examples))
             for col, (label, txt) in zip(cols, examples.items()):
@@ -391,7 +487,8 @@ with tab_chat:
                 col.button(label, on_click=answer_duration, args=(days,), width="stretch")
         elif last_kind == "chips":
             common = ["fever", "headache", "cough", "sore_throat", "runny_nose", "diarrhea", "abdominal_cramps",
-                      "heartburn", "constipation", "dysuria", "itchy_rash", "red_eye"]
+                      "heartburn", "constipation", "dysuria", "itchy_rash", "red_eye", "leg_pain", "back_pain",
+                      "joint_pain", "toothache", "mouth_ulcer", "cant_sleep", "spots_face", "ear_blocked"]
             cols = st.columns(4)
             for n, sid in enumerate(common):
                 cols[n % 4].button(SYMPTOMS[sid]["name"], key=f"chip_{sid}", on_click=add_symptom, args=(sid,),
@@ -399,7 +496,7 @@ with tab_chat:
         if stage in ("done", "emergency"):
             st.button("🔄 استشارة جديدة", on_click=reset_chat, type="primary")
 
-        user_text = st.chat_input("اكتب الأعراض أو ردك هنا...")
+        user_text = st.chat_input("اكتب الأعراض أو ردك هنا...", key="local_input")
         if user_text:
             handle_text(user_text)
             st.rerun()
